@@ -1,13 +1,12 @@
-import pyaudio
-import time
-from datetime import datetime
+import simpleaudio as sa
+import numpy as np
 import asyncio
 import websockets
 import os
 import json
 import base64
-import numpy as np
-import threading
+import pyaudio
+from datetime import datetime
 from dotenv import load_dotenv
 
 class AudioOut:
@@ -18,36 +17,11 @@ class AudioOut:
         self.audio_buffer = bytearray()
         self.audio_buffer_lock = asyncio.Lock()
         self.audio_playback_queue = asyncio.Queue()
-        self.stream = None
-        self.p = pyaudio.PyAudio()
-        self._stream_active = False
+        self.play_obj = None
+        self._stream_active = True
 
     async def start(self):
-        self.stream = self.p.open(
-            format=pyaudio.paInt16,
-            channels=self.channels,
-            rate=self.sample_rate,
-            output=True,
-            output_device_index=self.output_device_id,
-            stream_callback=self._audio_callback,
-            frames_per_buffer=1024
-        )
-        self._stream_active = True
-        self.stream.start_stream()
         await self._playback_loop()
-
-    def _audio_callback(self, in_data, frame_count, time_info, status):
-        if status:
-            print(status)
-        bytes_to_read = frame_count * self.channels * 2
-        with threading.Lock():
-            if len(self.audio_buffer) >= bytes_to_read:
-                data = self.audio_buffer[:bytes_to_read]
-                del self.audio_buffer[:bytes_to_read]
-            else:
-                data = self.audio_buffer + bytes([0] * (bytes_to_read - len(self.audio_buffer)))
-                self.audio_buffer.clear()
-        return (np.frombuffer(data, dtype='int16').tobytes(), pyaudio.paContinue)
 
     async def _playback_loop(self):
         while self._stream_active:
@@ -55,7 +29,10 @@ class AudioOut:
             if chunk is None:
                 continue
             async with self.audio_buffer_lock:
-                self.audio_buffer.extend(chunk)
+                audio_data = np.frombuffer(chunk, dtype=np.int16)
+                if self.play_obj and self.play_obj.is_playing():
+                    self.play_obj.stop()
+                self.play_obj = sa.play_buffer(audio_data, self.channels, 2, self.sample_rate)
 
     async def add_audio(self, chunk):
         await self.audio_playback_queue.put(chunk)
@@ -66,15 +43,13 @@ class AudioOut:
                 self.audio_playback_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-        async with self.audio_buffer_lock:
-            self.audio_buffer.clear()
+        if self.play_obj and self.play_obj.is_playing():
+            self.play_obj.stop()
 
     async def stop(self):
         self._stream_active = False
-        if self.stream:
-            self.stream.stop_stream()
-            self.stream.close()
-        self.p.terminate()
+        if self.play_obj and self.play_obj.is_playing():
+            self.play_obj.stop()
 
 class AudioStreamer:
     def __init__(self, api_key, input_device_id, output_device_id):
@@ -124,7 +99,7 @@ class AudioStreamer:
         for i in range(device_count):
             device_info = p.get_device_info_by_index(i)
             if (input_output == 'input' and device_info['maxInputChannels'] > 0) or \
-            (input_output == 'output' and device_info['maxOutputChannels'] > 0):
+               (input_output == 'output' and device_info['maxOutputChannels'] > 0):
                 print(f"{i}: {device_info['name']}")
         
         if input_output == 'input':
@@ -152,37 +127,17 @@ class AudioStreamer:
         return int(input("Enter output device ID manually: ").strip())
 
     def test_tone_pyaudio(self, output_device_id):
-        """Plays a short test tone on the selected output device."""
-        duration = 0.5  # seconds
-        frequency = 440.0  # A4 note
-        p = pyaudio.PyAudio()
-
+        duration = 0.5
+        frequency = 440.0
+        samples = (0.5 * np.sin(2 * np.pi * np.arange(int(self.sample_rate * duration)) * frequency / self.sample_rate))
+        audio_data = (samples * 32767).astype(np.int16)
+        
         try:
-            device_info = p.get_device_info_by_index(output_device_id)
-            if device_info['maxOutputChannels'] < 1:
-                raise ValueError("Selected device does not support audio output.")
-
-            samples = (0.5 * np.sin(2 * np.pi * np.arange(int(self.sample_rate * duration)) * frequency / self.sample_rate)).astype(np.float32)
-            
-            stream = p.open(format=pyaudio.paFloat32,
-                            channels=1,
-                            rate=self.sample_rate, 
-                            output=True,
-                            output_device_index=output_device_id,
-                            frames_per_buffer=1024)
-            
-            print(f"Playing test tone on device '{device_info['name']}'...")
-            stream.write(samples.tobytes())
-            stream.stop_stream()
-            stream.close()
-            p.terminate()
-            print("Test tone completed.")
+            play_obj = sa.play_buffer(audio_data, 1, 2, self.sample_rate)
+            play_obj.wait_done()
             return True
-
         except Exception as e:
             print(f"Failed to play test tone: {str(e)}")
-            if 'p' in locals():
-                p.terminate()
             return False
 
     async def startInteraction(self, ws):
@@ -263,7 +218,7 @@ class AudioStreamer:
         try:
             async with websockets.connect(self.url + "?model=" + os.getenv("MODEL"), extra_headers=headers) as ws:
                 await self.startInteraction(ws)
-        except:
+        except TypeError:
             async with websockets.connect(self.url + "?model=" + os.getenv("MODEL"), additional_headers=headers) as ws:
                 await self.startInteraction(ws)
 
@@ -296,12 +251,12 @@ class AudioStreamer:
             return (None, pyaudio.paContinue)
 
         stream = p.open(format=pyaudio.paInt16,
-                        channels=self.channels,
-                        rate=self.sample_rate,
-                        input=True,
-                        input_device_index=self.input_device_id,
-                        frames_per_buffer=int(self.sample_rate * self.chunk_duration),
-                        stream_callback=callback)
+                       channels=self.channels,
+                       rate=self.sample_rate,
+                       input=True,
+                       input_device_index=self.input_device_id,
+                       frames_per_buffer=int(self.sample_rate * self.chunk_duration),
+                       stream_callback=callback)
 
         stream.start_stream()
 
@@ -338,7 +293,7 @@ class AudioStreamer:
                 elif event["type"] == "input_audio_buffer.speech_stopped":
                     print("User stopped speaking.")
                 elif event["type"] == "response.function_call_arguments.done":
-                    print(f"Function call, arguments received: {event["arguments"]}")
+                    print(f"Function call, arguments received: {event['arguments']}")
                     response = await self.handle_function_call(event)
                     print(f"Sending response: {response}")
                     await ws.send(json.dumps(response))                    
@@ -350,7 +305,6 @@ class AudioStreamer:
                     if message != "Error committing input audio buffer: the buffer is empty.":
                         print(f"Error: {message}")
                 elif event["type"] == "response.audio_transcript.delta":
-                    # print(f"Transcript delta: {event['delta']}")
                     pass
                 elif event["type"] == "response.audio_transcript.done":
                     print(f"Transcript: {event['transcript']}")
@@ -361,7 +315,6 @@ class AudioStreamer:
                 print("Connection closed.")
                 break
 
-# Load environment variables from .env file
 load_dotenv()
 
 def main():
@@ -370,10 +323,8 @@ def main():
         api_key = input("Please enter your OpenAI API key: ")
 
     streamer = AudioStreamer(api_key, None, None)
-
     input_device_id = streamer.select_audio_device('input')
     output_device_id = streamer.select_audio_device('output')
-
     streamer = AudioStreamer(api_key, input_device_id, output_device_id)
 
     try:
