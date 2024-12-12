@@ -1,5 +1,4 @@
 import pyaudio
-import time
 from datetime import datetime
 import asyncio
 import websockets
@@ -263,7 +262,7 @@ class AudioStreamer:
         try:
             async with websockets.connect(self.url + "?model=" + os.getenv("MODEL"), extra_headers=headers) as ws:
                 await self.startInteraction(ws)
-        except:
+        except TypeError:
             async with websockets.connect(self.url + "?model=" + os.getenv("MODEL"), additional_headers=headers) as ws:
                 await self.startInteraction(ws)
 
