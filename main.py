@@ -261,10 +261,10 @@ class AudioStreamer:
         }
         try:
             async with websockets.connect(self.url + "?model=" + os.getenv("MODEL"), extra_headers=headers) as ws:
-                self.startInteraction(ws)
+                await self.startInteraction(ws)
         except AttributeError:
             async with websockets.connect(self.url + "?model=" + os.getenv("MODEL"), additional_headers=headers) as ws:
-                self.startInteraction(ws)
+                await self.startInteraction(ws)
 
     async def send_audio(self, ws):
         print("Start speaking to the assistant (Press Ctrl+C to exit).")
