@@ -1,26 +1,23 @@
-import sounddevice as sd  # Using sounddevice for device enumeration
-import simpleaudio as sa
-from datetime import datetime
+import pygame
+import numpy as np
 import asyncio
 import websockets
 import os
 import json
 import base64
-import numpy as np
-import time
-import threading
+from datetime import datetime
 from dotenv import load_dotenv
 
 class AudioOut:
-    def __init__(self, sample_rate, channels, output_device_id):
+    def __init__(self, sample_rate):
         self.sample_rate = sample_rate
-        self.channels = channels
-        self.output_device_id = output_device_id
         self.audio_buffer = bytearray()
         self.audio_buffer_lock = asyncio.Lock()
         self.audio_playback_queue = asyncio.Queue()
         self._stream_active = False
-        self.current_play_obj = None
+        
+        # Initialize Pygame mixer with stereo output
+        pygame.mixer.init(frequency=sample_rate, channels=2)
 
     async def start(self):
         self._stream_active = True
@@ -36,54 +33,46 @@ class AudioOut:
                     data = self.audio_buffer + bytes([0] * (2048 - len(self.audio_buffer)))
                     self.audio_buffer.clear()
                 
-                # Convert to numpy array and create audio object
-                audio_data = np.frombuffer(data, dtype='int16')
-                play_obj = sa.play_buffer(
-                    audio_data,
-                    num_channels=self.channels,
-                    bytes_per_sample=2,
-                    sample_rate=self.sample_rate
-                )
+                # Convert mono audio data to numpy array
+                audio_data = np.frombuffer(data, dtype=np.int16)
+                # Stack the same samples for both left and right channels
+                stereo_data = np.column_stack((audio_data, audio_data)).flatten()
                 
-                if self.current_play_obj and self.current_play_obj.is_playing():
-                    self.current_play_obj.stop()
-                
-                self.current_play_obj = play_obj
+                # Create a Pygame Sound object and play it
+                sound = pygame.mixer.Sound(buffer=stereo_data.tobytes())
+                sound.play()
             
             await asyncio.sleep(0.01)  # Small delay to prevent CPU overload
 
     async def add_audio(self, chunk):
-        await self.audio_playback_queue.put(chunk)
+        if chunk is not None:
+            async with self.audio_buffer_lock:
+                self.audio_buffer.extend(chunk)
 
     async def clear_audio(self):
-        while not self.audio_playback_queue.empty():
-            try:
-                self.audio_playback_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+        pygame.mixer.stop()
         async with self.audio_buffer_lock:
             self.audio_buffer.clear()
 
     async def stop(self):
         self._stream_active = False
-        if self.stream:
-            self.stream.stop_stream()
-            self.stream.close()
-        self.p.terminate()
+        pygame.mixer.quit()
 
 class AudioStreamer:
-    def __init__(self, api_key, input_device_id, output_device_id):
+    def __init__(self, api_key):
         self.api_key = api_key
-        self.input_device_id = input_device_id
-        self.output_device_id = output_device_id
         self.sample_rate = 24000
-        self.channels = 1
-        self.chunk_duration = 1
+        self.channels = 1  # Mono for API compliance
+        self.chunk_duration = 0.1  # Changed to 100ms chunks
         self.audio_format = 'int16'
         self.should_record = True
         self.url = os.getenv("WS_URL")
         self.recorded_audio = bytearray()
-        self.audio_out = AudioOut(self.sample_rate, self.channels, self.output_device_id)
+        self.audio_out = AudioOut(self.sample_rate)
+        
+        # Initialize Pygame
+        pygame.init()
+        pygame.mixer.init(frequency=self.sample_rate, channels=2)
 
     async def handle_function_call(self, event):
         try:
@@ -111,66 +100,9 @@ class AudioStreamer:
                 })
             }
 
-    def select_audio_device(self, input_output):
-        
-        devices = sd.query_devices()
-        if input_output == 'input':
-            print("Available input devices:")
-            for i, dev in enumerate(devices):
-                if dev['max_input_channels'] > 0:
-                    print(f"{i}: {dev['name']}")
-                    
-            while True:
-                try:
-                    device_id = int(input("Enter input device ID: ").strip())
-                    if devices[device_id]['max_input_channels'] > 0:
-                        return device_id
-                    print("Invalid device. Choose again.")
-                except (ValueError, IndexError):
-                    print("Invalid input. Enter a valid ID.")
-        
-        else:  # Output device selection
-            print("Available output devices:")
-            for i, dev in enumerate(devices):
-                if dev['max_output_channels'] > 0:
-                    print(f"{i}: {dev['name']}")
-                    print(f"\nTesting device {i}: {dev['name']}")
-                    if self.test_tone_simpleaudio():
-                        if input("Did you hear the tone? (y/n): ").lower().strip() == 'y':
-                            return i
-            
-            return int(input("Enter output device ID manually: ").strip())
-
-    def test_tone_simpleaudio(self):
-        try:
-            duration = 0.5
-            frequency = 440.0
-            samples = (0.5 * np.sin(2 * np.pi * np.arange(int(self.sample_rate * duration)) * 
-                    frequency / self.sample_rate)).astype(np.float32)
-            
-            samples = (samples * 32767).astype(np.int16)
-            audio_data = samples.tobytes()
-            
-            def play_audio():
-                play_obj = sa.play_buffer(
-                    audio_data,
-                    num_channels=1,
-                    bytes_per_sample=2,
-                    sample_rate=self.sample_rate
-                )
-                
-            thread = threading.Thread(target=play_audio)
-            thread.start()
-            time.sleep(duration + 0.1)  # Wait slightly longer than duration
-            return True
-            
-        except Exception as e:
-            print(f"Failed to play test tone: {str(e)}")
-            return False
-    
     async def startInteraction(self, ws):
         print("Connected to the OpenAI Realtime API.")
-
+        
         event = await ws.recv()
         event_data = json.loads(event)
         if event_data["type"] == "session.created":
@@ -250,34 +182,29 @@ class AudioStreamer:
             async with websockets.connect(self.url + "?model=" + os.getenv("MODEL"), additional_headers=headers) as ws:
                 await self.startInteraction(ws)
 
-async def send_audio(self, ws):
-    print("Start speaking to the assistant (Press Ctrl+C to exit).")
-    loop = asyncio.get_event_loop()
-    required_samples = int(self.sample_rate * self.chunk_duration)
-    
-    import sounddevice as sd
-    audio_queue = asyncio.Queue()
-
-    def callback(indata, frames, time, status):
-        if status:
-            print(status)
-        audio_queue.put_nowait(bytes(indata))
-
-    stream = sd.InputStream(
-        channels=self.channels,
-        samplerate=self.sample_rate,
-        device=self.input_device_id,
-        blocksize=required_samples,
-        dtype=np.int16,
-        callback=callback
-    )
-
-    with stream:
+    async def send_audio(self, ws):
+        print("Start speaking to the assistant (Press Ctrl+C to exit).")
+        required_samples = int(self.sample_rate * self.chunk_duration)
+        samples_size = required_samples * 2  # 2 bytes per sample for int16
+        
+        # Initialize PyGame audio recording
+        pygame.mixer.quit()  # Reset the mixer
+        pygame.mixer.init(frequency=self.sample_rate, size=-16, channels=1)
+        pygame.mixer.set_num_channels(2)
+        
         try:
+            pygame.mixer.get_init()
+            pygame.mixer.Channel(0).set_volume(1.0)
+            pygame.mixer.Channel(1).set_volume(1.0)
+            
+            # Start recording
+            recording = pygame.mixer.get_raw()
+            
             while self.should_record:
-                audio_chunk = await audio_queue.get()
-                if len(audio_chunk) >= required_samples * 2:
-                    encoded_audio = base64.b64encode(audio_chunk).decode('utf-8')
+                # Read audio chunk
+                chunk = recording.read(samples_size)
+                if len(chunk) > 0:
+                    encoded_audio = base64.b64encode(chunk).decode('utf-8')
                     await ws.send(json.dumps({
                         "type": "input_audio_buffer.append",
                         "audio": encoded_audio
@@ -286,8 +213,13 @@ async def send_audio(self, ws):
                         "type": "input_audio_buffer.commit"
                     }))
                 await asyncio.sleep(0.01)
+        
+        except Exception as e:
+            print(f"Error in audio recording: {str(e)}")
         finally:
-            stream.stop()
+            if 'recording' in locals():
+                recording.stop()
+            pygame.mixer.quit()
 
     async def receive_events(self, ws):
         while True:
@@ -333,20 +265,14 @@ async def send_audio(self, ws):
                 print("Connection closed.")
                 break
 
-# Load environment variables from .env file
-load_dotenv()
-
 def main():
+    load_dotenv()
+    
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         api_key = input("Please enter your OpenAI API key: ")
 
-    streamer = AudioStreamer(api_key, None, None)
-
-    input_device_id = streamer.select_audio_device('input')
-    output_device_id = streamer.select_audio_device('output')
-
-    streamer = AudioStreamer(api_key, input_device_id, output_device_id)
+    streamer = AudioStreamer(api_key)
 
     try:
         asyncio.run(streamer.start())
