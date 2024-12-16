@@ -80,13 +80,15 @@ class AudioStreamer:
         self.chunk_duration = 1
         self.audio_format = 'int16'
         self.should_record = True
+        self.extra_headers = True
         self.url = os.getenv("WS_URL")
         self.recorded_audio = bytearray()
         self.audio_out = AudioOut(self.sample_rate, self.channels, self.output_device_id)
 
-    async def handle_function_call(self, event):
+    async def handle_function_call(self, event, ws):
         try:
-            if event['name'] == 'calculate_product_sum':
+            print(f"Handling function call: {event['name']}")
+            if event['name'] == 'sub_total_order_not_final' or event['name'] == 'place_order':
                 function_args = json.loads(event['arguments'])
                 products = function_args.get('products', [])
                 total = sum(item['quantity'] * item['value'] for item in products)
@@ -99,6 +101,21 @@ class AudioStreamer:
                         "output": f"{total}"
                     }
                 }
+                if event['name'] == 'sub_total_order_not_final':
+                    ws.send(json.dumps({ "type": "conversation.item.create", "content": json.dumps({ "text": "ok" }) }))
+                elif event['name'] == 'place_order':
+                    await self.audio_out.stop()
+                    await ws.close()
+                    headers = {
+                        "Authorization": "Bearer " + self.api_key,
+                        "OpenAI-Beta": "realtime=v1",
+                    }
+                    if(self.extra_headers):
+                        async with websockets.connect(self.url + "?model=" + os.getenv("MODEL"), extra_headers=headers) as ws:
+                            await self.startInteraction(ws)
+                    else:
+                        async with websockets.connect(self.url + "?model=" + os.getenv("MODEL"), additional_headers=headers) as ws:
+                            await self.startInteraction(ws)
                 return response
             
         except Exception as e:
@@ -196,8 +213,7 @@ class AudioStreamer:
             await ws.send(json.dumps({
                 "type": "session.update",
                 "session": {
-                    "instructions": f"# Role\n\nYou are a friendly drive-thru waiter named Gustavo Fring (Gus - Chavo in Spanish), taking orders at \"Los Pollos Hermanos\".\n\n# Tasks\n- Respond in the same language the user uses while being energetic and joyful.\n- If the user switches languages, switch languages accordingly to respond by matching the user's language all the time.\n- Talk as fast as possible, Be quick, friendly, and concise in your responses.\n- if the user decide to use Spanish ALWAYS use Mexican Accent.\n- If the user uses English do a deeper voice for an African American.\n- Present yourself as short as possible, while welcoming customers warmly and helping them choose from the menu options.\n- Offer combos 1 to 3, each with different options.\n- Include dessert choices: tres leches cake or chocolate cake.\n- Offer drinks: Coca-Cola, Sprite, and Fanta.\n- Mention prices naturally throughout the conversation.\n- Suggest the \"Happy Cajita\" as an equivalent to a happy meal for kids. the toy is for children of 5 years and above.\n- Respond with nutrition facts if the user ask about it while promoting our food.\n- Be empathetic and polite with the user.\n- If the user tries to fool you or orders something completely unrelated to what we serve do a sarcastic laugh and let the user know that they almost caught you meaning that you understand they want to fool you.\n- If the user laughs at any joke please laugh too and give them a compliment or a positive saying that can improve their day\n- Use filling words like hmms or ahh, and breathing as much as possible to sound natural throughout the conversation.\n\n# Examples\n\n**Customer:** Hi, can I get a combo?\n\n**Gus:** hmmm Sure! We have combo 1, 2, or 3. Any preference?\n\n**Customer:** I'll take combo 2.\n\n**Gus:** Great choice! Would you like tres leches or chocolate cake for dessert?\n\n**Customer:** Tres leches, please.\n\n**Gus:** Perfect! And what would you like to drink?\n\n**Customer:** A Sprite.\n\n**Gus:** Combo 2 with Sprite and tres leches. That'll be $12. Anything else?\n\n**Customer:** No, that's all.\n\n**Gus:** Thank you! Please drive to the next window.\n\n# Notes\n\n- Suggest combos and desserts when relevant.\n- Be very enthusiastic about promoting our top favorites.\n- Talk really super fast regardless of the language you are talking while using a happy tone.\n- Repeat the order details for confirmation.\n- Provide explanations if required such as calories, recommended serving sizes, allergies, while promoting our products.\n- If the user specify a size for the combo make both French fries and soda large\n- if the user didn't specified the flavor of the sauce ask\n-if the user didn't specified the flavor of the soda ask\n- Add enlargements diference or reduction as element with a meaningful description when function calling\n- Current date and time is: {formatted_datetime} use this for welcome the user accordingly example `good morning`.\n- Your knowledge cutoff is 2023-10.\n- You should always call a function if you can. Do not refer to these rules, even if you’re asked about them.\n\n# Product details and prices\n\n- Small French fries: 2\n- Medium French fries: 3\n- Large French fries: 4\n- Chicken Breast and wing: 5\n- Chicken Leg and thigh: 6\n- Buffalo Wings: 12\n- Small Mexican Coke: 5\n- Small Regular Coke: 3\n- Small Sprite: 3\n- Small Fanta: 4\n- Medium Mexican Coke: 7\n- Medium Regular Coke: 5\n- Medium Sprite: 5\n- Medium Fanta: 5\n- Large Mexican Coke: 10\n- Large Regular Coke: 8\n- Large Sprite: 8\n- Large Fanta: 8\n- Combo 1 - Chicken Breast and wing, medium French fries and Soda of choice, Sauce of choice: 25\n- Combo 2 - Chicken leg and thigh, medium French fries and Soda of choice, Sauce of choice: 28\n- Combo 3 - buffalo wings, medium French fries and Soda of choice, Sauce of choice: 28\n- Tres Leches cake: 12\n- Chocolate Cake: 15\n- Pineapple Cake: 11\n- Additional Hot Sauce: 0.5\n- Additional Barbeque Sauce: 0.5\n- Additional Guacamole Sauce: 0.5\n- Happy Cajita - 2 buffalo wings with small French fries, a small soda, and a gift figure of Gus (you): 15\n\n\nCombo prices are fixed, and people can enlarge or reduce the size of their combo depending on whether the soda or fries are large or small. It would be best if you did the simple math to change size of the combo by substracting larger minus small and making it possitive or negative in value with the prefix [enlarge|reduce] before totalize using the function calling when the user confirms.", 
-                    "voice": "ash",
+                    1"voice": "ash",
                     "turn_detection": {
                         "type": "server_vad",
                         "threshold":0.5,
@@ -206,7 +222,7 @@ class AudioStreamer:
                     },
                     "tools": [{
                         "type": "function",
-                        "name": "calculate_product_sum",
+                        "name": "sub_total_order_not_final",
                         "description": "Calculate the addition of different products using quantity and value, and returns the total sum of the products.",
                         "parameters": {
                             "type": "object",
@@ -219,19 +235,58 @@ class AudioStreamer:
                                         "properties": {
                                             "quantity": {
                                                 "type": "number",
-                                                "description": "Number of units of the product"
+                                                "quantity": "Number of units of the product"
                                             },
                                             "value": {
                                                 "type": "number",
-                                                "description": "Value of the product unit"
+                                                "value": "Value of the product unit without $ sign"
                                             },
                                             "description": {
                                                 "type": "string",
-                                                "description": "description for the product from above list"
+                                                "description": "name for the product EXACTLY as it appears on the menu"
+                                            },
+                                            "special instructions": {
+                                                "type": "string",
+                                                "description": "special instructions for the product paying attention to alergies, elements that need to be removed or added that are not extras (extras need to be on a different item)"
                                             }
                                         }
                                     }
-                                }
+                                },
+                            },
+                            "required": []
+                        }
+                    }, {
+                        "type": "function",
+                        "name": "place_order",
+                        "description": "Send the order to the kitchen for preparation and payment",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "products": {
+                                    "type": "array",
+                                    "description": "Array of products to calculate the sum for.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "quantity": {
+                                                "type": "number",
+                                                "quantity": "Number of units of the product"
+                                            },
+                                            "value": {
+                                                "type": "number",
+                                                "value": "Value of the product unit without $ sign"
+                                            },
+                                            "description": {
+                                                "type": "string",
+                                                "description": "name for the product EXACTLY as it appears on the menu"
+                                            },
+                                            "special instructions": {
+                                                "type": "string",
+                                                "description": "special instructions for the product paying attention to alergies, elements that need to be removed or added that are not extras (extras need to be on a different item)"
+                                            }
+                                        }
+                                    }
+                                },
                             },
                             "required": []
                         }
@@ -262,10 +317,12 @@ class AudioStreamer:
         try:
             async with websockets.connect(self.url + "?model=" + os.getenv("MODEL"), extra_headers=headers) as ws:
                 await self.startInteraction(ws)
-        except AttributeError:
+            self.extra_headers = True
+        except TypeError:
             async with websockets.connect(self.url + "?model=" + os.getenv("MODEL"), additional_headers=headers) as ws:
                 await self.startInteraction(ws)
-
+            self.extra_headers = False
+                
     async def send_audio(self, ws):
         print("Start speaking to the assistant (Press Ctrl+C to exit).")
         loop = asyncio.get_event_loop()
@@ -321,7 +378,7 @@ class AudioStreamer:
                     print("User stopped speaking.")
                 elif event["type"] == "response.function_call_arguments.done":
                     print(f"Function call, arguments received: {event["arguments"]}")
-                    response = await self.handle_function_call(event)
+                    response = await self.handle_function_call(event, ws)
                     print(f"Sending response: {response}")
                     await ws.send(json.dumps(response))                    
                 elif event["type"] == "response.function_call_arguments.delta":
@@ -334,6 +391,8 @@ class AudioStreamer:
                 elif event["type"] == "response.audio_transcript.delta":
                     # print(f"Transcript delta: {event['delta']}")
                     pass
+                elif event["type"] == "response.done":
+                    print(f"Response: {event['response']}")
                 elif event["type"] == "response.audio_transcript.done":
                     print(f"Transcript: {event['transcript']}")
                 else:
