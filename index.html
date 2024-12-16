@@ -173,7 +173,8 @@ window.onload = async function () {
 
     const payload = { audioPackages: [...audioQueue] };
     try {
-      const response = await fetch('http://localhost/audio.php', {
+      // const response = await fetch('http://127.0.0.1:8000/process-audio', {
+        const response = await fetch('http://localhost:8888/audio2.php', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
