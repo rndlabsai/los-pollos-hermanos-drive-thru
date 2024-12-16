@@ -41,7 +41,7 @@ class OpenAIRealtimeClient:
         self.frontend_event = {}
 
     async def connect(self):
-        if self.websocket and not self.websocket.closed:
+        if self.websocket and self.websocket.state.name == 'CLOSED':# self.websocket.closed:
             return
 
         headers = {
@@ -125,56 +125,55 @@ class OpenAIRealtimeClient:
         while True:
             try:
                 # Ensure websocket is connected
-                if not self.websocket or self.websocket.closed:
+                if not self.websocket or self.websocket.state.name == 'CLOSED':# self.websocket.closed:
                     await self.connect()
 
                 response = await self.websocket.recv()
                 event = json.loads(response)
-                print(event["type"])
+                print(f"{Colors.GREEN}{event["type"]}{Colors.ENDC}")
 
                 # Prepare event for frontend
-                self.frontend_event = {"type": event["type"]}
-                
-                if event["type"] == "response.audio.delta":
-                    # Decode and send audio chunk to frontend
-                    audio_chunk = base64.b64encode(base64.b64decode(event["delta"])).decode('utf-8')
-                    # audio_chunk = event["delta"] 
-                    # If audioPackages key doesn't exist, create it as a list
-                    if "audioPackages" not in self.frontend_event:
-                        self.frontend_event["audioPackages"] = audio_chunk
-                    # If it exists, append to the list
-                    else:
-                        if isinstance(self.frontend_event["audioPackages"], str):
-                            self.frontend_event["audioPackages"] += audio_chunk
+                # self.frontend_event = {"type": event["type"]}
+                self.frontend_event["type"] = event["type"]
+                match event["type"]:
+                    case "response.audio.delta":
+                        # Decode and send audio chunk to frontend
+                        audio_chunk = base64.b64encode(base64.b64decode(event["delta"])).decode('utf-8')
+                        # audio_chunk = event["delta"] 
+                        # If audioPackages key doesn't exist, create it as a list
+                        if "audioPackages" not in self.frontend_event:
+                            self.frontend_event["audioPackages"] = [audio_chunk]
+                        # If it exists, append to the list
                         else:
-                            self.frontend_event["audioPackages"] = audio_chunk
-                    # print(audio_chunk)
+                            if isinstance(self.frontend_event["audioPackages"], list):
+                                self.frontend_event["audioPackages"].append(audio_chunk)
+                            else:
+                                self.frontend_event["audioPackages"] = [audio_chunk]
+                        # print(audio_chunk)
                 
-                elif event["type"] == "response.audio.done":
-                    self.frontend_event["status"] = "complete"
+                    case "response.audio.done":
+                        # self.frontend_event["status"] = "complete"
+                        pass
                 
-                elif event["type"] == "response.audio_transcript.delta":
-                    # print(event['delta'])
-                    print(f"{Colors.GREEN}{event['delta']}{Colors.ENDC}")
+                    case "response.audio_transcript.delta":
+                        # print(event['delta'])
+                        print(f"{Colors.GREEN}{event['delta']}{Colors.ENDC}")
+                    case "response.audio_transcript.done":
+                        self.frontend_event["transcript"] = event['transcript']
+                        # print(event['transcript'])
+                        print(f"{Colors.GREEN}{event['transcript']}{Colors.ENDC}")
+                    case "response.function_call_arguments.done":
+                        # Handle function call
+                        response = await self.handle_function_call(event)
+                        await self.websocket.send(json.dumps(response))
+                        # self.frontend_event["function_call"] = event['arguments']
                     
-                    
-                elif event["type"] == "response.audio_transcript.done":
-                    self.frontend_event["transcript"] = event['transcript']
-                    # print(event['transcript'])
-                    print(f"{Colors.GREEN}{event['transcript']}{Colors.ENDC}")
-# print(f"{Colors.FAIL}Error!{Colors.ENDC}")
-# print(f"{Colors.WARNING}Warning!{Colors.ENDC}")    
-                elif event["type"] == "response.function_call_arguments.done":
-                    # Handle function call
-                    response = await self.handle_function_call(event)
-                    await self.websocket.send(json.dumps(response))
-                    self.frontend_event["function_call"] = event['arguments']
-                
-                elif event["type"] == "response.done":
-                    self.frontend_event["response"]= event['response']
-                    print(f"{Colors.GREEN}response.done{Colors.ENDC}")
-                else :
-                    self.frontend_event.update(event)
+                    case "response.done":
+                        self.frontend_event["response"]= event['response']
+                        print(f"{Colors.GREEN}response.done{Colors.ENDC}")
+                    case _:
+                        # self.frontend_event.update(event)
+                        pass
             except websockets.exceptions.ConnectionClosed:
                 print("OpenAI WebSocket Connection closed. Attempting to reconnect...")
                 await self.connect()
@@ -228,7 +227,7 @@ class OpenAIRealtimeClient:
             return False
     
     async def send_audio_chunk(self, audio_chunk):
-        if not self.websocket or self.websocket.closed:
+        if not self.websocket or self.websocket.state.name == 'CLOSED': #or self.websocket.closed:
             await self.connect()
 
         try:
@@ -263,13 +262,13 @@ async def startup_event():
 async def process_audio_chunk(
     data: Dict[str, Any] = Body(
         ...,
-        example={"audioPackages": "AAAAAAA..."},
+        example={"audioPackages": ["AAAAAAA..."]},
         openapi_extra={
             "type": "object",
             "properties": {
                 "audioPackages": {
-                    "type": "string",
-                    "description": "Base64 encoded audio data"
+                    "type": "array",
+                    "description": "Base64 encoded audio data packages",
                 }
             },
             "required": ["audioPackages"]
@@ -285,6 +284,9 @@ async def process_audio_chunk(
     print(f"{Colors.WARNING}{result}{Colors.ENDC}")
     if openai_client.frontend_event.get("type") == "response.audio.delta":
         sys.exit(0)
+    if result.get('type') in ['session.updated', 'session.created']:
+        # Your code here
+        return {"frame": "queued"}
     return result
 
 
