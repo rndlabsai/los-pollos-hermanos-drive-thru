@@ -112,6 +112,8 @@ window.onload = function () {
   let activeStream = null;
   let activeProcessor = null;
   let isRecording = false;
+  let audiobuffer = [];
+  let played = false;
 
   function logDebug(message) {
     const logMessage = document.createElement('p');
@@ -347,19 +349,40 @@ window.onload = function () {
 
     const payload = { audioPackages: [...audioQueue] };
     try {
-      //const response = await fetch('http://localhost/audio0.php', {
-      const response = await fetch('http://127.0.0.1:8000/process-audio', {
+      //const response = await fetch('http://localhost/audio2.php', {
+      const response = await fetch('http://127.0.0.1:8000/process-audio', { 
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json' }, 
         body: JSON.stringify(payload),
       });
+
 
       if (response.status === 200) {
         logDebug('Audio packages sent successfully.');
         audioQueue.length = 0; // Clear queue on success
         const result = await response.json();
-        if (result.audioPackages) {
-          playAudio(result.audioPackages);
+        if (result.audioPackages) {     
+  
+          result.audioPackages.forEach(package => {
+                // Base64 validation pattern  
+                const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
+                
+                // Only add if the position is empty and the chunk is valid
+                if (audiobuffer[package.idx] === undefined) 
+                  if (base64Regex.test(package.audio)) {
+                    // Place each chunk at its correct index position
+                    audiobuffer[package.idx] = package.audio;
+                  } else {
+                    console.warn(`Invalid base64 data received at index ${package.idx}`);
+                  }                
+                  
+
+            });
+          if (result.audioFrame === 'done' && !played) {
+            played = true;
+            playAudio(audiobuffer);
+            audiobuffer = [];
+          }
         }
       } else if (response.status === 429) {
         logDebug('Backend returned 429. Retrying in 300ms...');
@@ -377,21 +400,26 @@ window.onload = function () {
       audioContext = new AudioContext({ sampleRate: 24000 });
     }
     
-    for (const base64Audio of audioPackages) {
-      const audioBuffer = Uint8Array.from(atob(base64Audio), c => c.charCodeAt(0));
-      const pcmAudio = new Int16Array(audioBuffer.buffer);
-      const audioData = audioContext.createBuffer(1, pcmAudio.length, 24000);
-      const audioChannel = audioData.getChannelData(0);
+    for (let i = 0; i < audioPackages.length; i++) {
+      try {
+        const audioBuffer = Uint8Array.from(atob(audioPackages[i]), c => c.charCodeAt(0));
+        const pcmAudio = new Int16Array(audioBuffer.buffer);
+        const audioData = audioContext.createBuffer(1, pcmAudio.length, 24000);
+        const audioChannel = audioData.getChannelData(0);
 
-      for (let i = 0; i < pcmAudio.length; i++) {
-        audioChannel[i] = pcmAudio[i] / 32768;
+        for (let j = 0; j < pcmAudio.length; j++) {
+          audioChannel[j] = pcmAudio[j] / 32768;
+        }
+
+        const source = audioContext.createBufferSource();
+        source.buffer = audioData;
+        source.connect(audioContext.destination);
+        source.start();
+        logDebug('Audio package played back successfully.');
+      } catch (error) {
+        console.warn(`Error decoding audio chunk at index ${i}: ${error.message}`);
+        // Continue with next chunk
       }
-
-      const source = audioContext.createBufferSource();
-      source.buffer = audioData;
-      source.connect(audioContext.destination);
-      source.start();
-      logDebug('Audio played back successfully.');
     }
   }
 };

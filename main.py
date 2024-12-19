@@ -39,6 +39,7 @@ class OpenAIRealtimeClient:
         self.receive_task = None
         self.frontend_websockets = set()
         self.frontend_event = {}
+        self.audiopackage_count = 0
 
     async def connect(self):
         if self.websocket and self.websocket.state.name == 'CLOSED':# self.websocket.closed:
@@ -139,20 +140,28 @@ class OpenAIRealtimeClient:
                     case "response.audio.delta":
                         # Decode and send audio chunk to frontend
                         audio_chunk = base64.b64encode(base64.b64decode(event["delta"])).decode('utf-8')
-                        # audio_chunk = event["delta"] 
+                        
+                        # Create an indexed package with the current count
+                        indexed_package = {
+                            "idx": self.audiopackage_count,
+                            "audio": audio_chunk
+                        }                        
                         # If audioPackages key doesn't exist, create it as a list
                         if "audioPackages" not in self.frontend_event:
-                            self.frontend_event["audioPackages"] = [audio_chunk]
+                            self.frontend_event["audioPackages"] = [indexed_package]
                         # If it exists, append to the list
                         else:
                             if isinstance(self.frontend_event["audioPackages"], list):
-                                self.frontend_event["audioPackages"].append(audio_chunk)
+                                self.frontend_event["audioPackages"].append(indexed_package)
                             else:
-                                self.frontend_event["audioPackages"] = [audio_chunk]
+                                self.frontend_event["audioPackages"] = [indexed_package]
                         # print(audio_chunk)
+                        # Increment the counter for next package
+                        self.audiopackage_count += 1                        
                 
                     case "response.audio.done":
-                        # self.frontend_event["status"] = "complete"
+                        self.frontend_event["audioFrame"] = "done"
+                        self.audiopackage_count = 0
                         pass
                 
                     case "response.audio_transcript.delta":
