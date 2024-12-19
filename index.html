@@ -22,8 +22,15 @@
 	background-size: auto;
   }
 
+  .custom-rounded {
+  background-color: #ffffff;
+  border-radius: 50% 50% 50% 50%; /* top-left top-right bottom-right bottom-left */
+  }
+
   .microphone-container {
-    position: relative;
+    position: absolute;
+    top: 330px;
+    left: 625px;
     width: 150px;
     height: 150px;
     margin-bottom: 20px;
@@ -77,7 +84,7 @@
 </style>
 </head>
 <body>
-<div class="microphone-container">
+<div class="microphone-container custom-rounded">
   <div class="halo" id="halo"></div>
   <svg fill="#000000" height="150px" width="100px" version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" xmlns:xlink="http://www.w3.org/1999/xlink" enable-background="new 0 0 512 512">
     <g>
@@ -88,18 +95,25 @@
     </g>
   </svg>
 </div>
-<p class="device-info" id="device-info">Detecting input device...</p>
-<div class="debug-container" id="debug-container">
+<p class="device-info" id="device-info" style="display: none;">Detecting input device...</p>
+<div class="debug-container" id="debug-container" style="display: none;">
   <p class="debug-message">Debug Log:</p>
 </div>
 
 <script>
-window.onload = async function () {
+window.onload = function () {
   const debugContainer = document.getElementById('debug-container');
   const deviceInfoLabel = document.getElementById('device-info');
   const halo = document.getElementById('halo');
   const audioQueue = [];
   const retryInterval = 300;
+  const BUFFER_SIZE = 4096;
+  let audioContext = null;
+  let activeStream = null;
+  let activeProcessor = null;
+  let isRecording = false;
+  let audiobuffer = [];
+  let played = false;
 
   function logDebug(message) {
     const logMessage = document.createElement('p');
@@ -116,75 +130,259 @@ window.onload = async function () {
     return;
   }
 
-  try {
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const audioInputDevices = devices.filter(device => device.kind === 'audioinput');
+  // Create toggle button
+  const toggleButton = document.createElement('button');
+  toggleButton.textContent = 'Start Recording';
+  toggleButton.style.padding = '10px 20px';
+  toggleButton.style.margin = '10px';
+  toggleButton.style.borderColor = 'transparent';
+  toggleButton.style.backgroundColor = 'transparent';
+  document.body.insertBefore(toggleButton, debugContainer);
 
-    if (audioInputDevices.length > 0) {
-      const selectedDevice = audioInputDevices[0];
-      deviceInfoLabel.textContent = `Input Device: ${selectedDevice.label} (ID: ${selectedDevice.deviceId})`;
-    } else {
-      deviceInfoLabel.textContent = 'No audio input devices detected.';
+
+  // Function to stop recording
+  function stopRecording() {
+    if (activeProcessor) {
+      activeProcessor.disconnect();
+      activeProcessor = null;
     }
-  } catch (error) {
-    deviceInfoLabel.textContent = 'Error detecting input devices.';
-    logDebug(`Error: ${error.message}`);
-    return;
+    if (activeStream) {
+      activeStream.getTracks().forEach(track => track.stop());
+      activeStream = null;
+    }
+    if (audioContext) {
+      audioContext.close();
+      audioContext = null;
+    }
+    isRecording = false;
+    toggleButton.textContent = 'Start Recording';
+    toggleButton.disabled = false;
+    halo.style.width = '100px';
+    halo.style.height = '100px';
+    halo.style.opacity = '0';
+    logDebug('Recording stopped.');
   }
 
-  const audioContext = new AudioContext({ sampleRate: 24000 });
+  toggleButton.onclick = async function() {
+    if (isRecording) {
+      stopRecording();
+      return;
+    }
 
-  navigator.mediaDevices.getUserMedia({ audio: true })
-    .then((stream) => {
+    // Start recording
+    toggleButton.disabled = true;
+    toggleButton.textContent = 'Starting...';
+
+    try {
+      // Create AudioContext after user gesture
+      audioContext = new AudioContext({ sampleRate: 24000 });
+      
+      // Check microphone permissions
+      const permissionResult = await navigator.permissions.query({ name: 'microphone' });
+      
+      if (permissionResult.state === 'denied') {
+        throw new Error('Microphone permission has been denied. Please allow microphone access in your browser settings.');
+      }
+
+      // Enumerate devices
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputDevices = devices.filter(device => device.kind === 'audioinput');
+
+      if (audioInputDevices.length > 0) {
+        const selectedDevice = audioInputDevices[0];
+        deviceInfoLabel.textContent = `Input Device: ${selectedDevice.label} (ID: ${selectedDevice.deviceId})`;
+      } else {
+        deviceInfoLabel.textContent = 'No audio input devices detected.';
+      }
+
+      // Create the AudioWorklet processor code
+      const workletCode = `
+        class CustomProcessor extends AudioWorkletProcessor {
+          constructor() {
+            super();
+            this._buffer = new Float32Array(${BUFFER_SIZE});
+            this._bufferIndex = 0;
+          }
+
+          process(inputs, outputs) {
+            const input = inputs[0];
+            if (!input || !input[0]) return true;
+
+            const inputChannel = input[0];
+            
+            // Calculate RMS for visualization
+            const rms = Math.sqrt(
+              inputChannel.reduce((sum, val) => sum + val * val, 0) / 
+              inputChannel.length
+            );
+            
+            // Add samples to buffer
+            for (let i = 0; i < inputChannel.length; i++) {
+              this._buffer[this._bufferIndex] = inputChannel[i];
+              this._bufferIndex++;
+
+              if (this._bufferIndex >= this._buffer.length) {
+                this.port.postMessage({
+                  type: 'processedBuffer',
+                  buffer: Array.from(this._buffer),
+                  rms: rms
+                });
+
+                this._buffer = new Float32Array(${BUFFER_SIZE});
+                this._bufferIndex = 0;
+              }
+            }
+
+            return true;
+          }
+        }
+
+        registerProcessor('custom-processor', CustomProcessor);
+      `;
+
+      // Create a Blob containing the worklet code
+      const blob = new Blob([workletCode], { type: 'application/javascript' });
+      const workletUrl = URL.createObjectURL(blob);
+
+      try {
+        await audioContext.audioWorklet.addModule(workletUrl);
+      } finally {
+        URL.revokeObjectURL(workletUrl);
+      }
+
+      // Request microphone access
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+
+      activeStream = stream;
       logDebug('Microphone access granted.');
-      const source = audioContext.createMediaStreamSource(stream);
-      const processor = audioContext.createScriptProcessor(4096, 1, 1);
 
+      const source = audioContext.createMediaStreamSource(stream);
+      
+      // Create a custom AudioWorkletNode for processing
+      class CustomAudioProcessor extends AudioWorkletNode {
+        constructor(context) {
+          super(context, 'custom-processor', {
+            numberOfInputs: 1,
+            numberOfOutputs: 1,
+            channelCount: 1,
+            processorOptions: {
+              bufferSize: BUFFER_SIZE
+            }
+          });
+
+          this._buffer = new Float32Array(BUFFER_SIZE);
+          this._bufferIndex = 0;
+
+          // Set up the audio processing
+          this.port.onmessage = this._handleMessage.bind(this);
+        }
+
+        _handleMessage(event) {
+          if (event.data.type === 'processedBuffer') {
+            const { buffer, rms } = event.data;
+            
+            // Update visualization
+            const scaledVolume = Math.min(rms * 10, 1);
+            halo.style.width = `${100 + scaledVolume * 100}px`;
+            halo.style.height = `${100 + scaledVolume * 100}px`;
+            halo.style.opacity = scaledVolume;
+
+            // Convert to base64
+            const pcmSamples = new Int16Array(buffer.map(
+              sample => Math.max(-1, Math.min(1, sample)) * 32767
+            ));
+            const byteArray = new Uint8Array(pcmSamples.buffer);
+            const base64Data = btoa(String.fromCharCode(...byteArray));
+
+            // Queue the audio data
+            audioQueue.push(base64Data);
+            logDebug(`Audio package queued: ${base64Data.substring(0, 30)}...`);
+            processQueue();
+          }
+        }
+      }
+
+      // Create and connect the nodes
+      const processor = new CustomAudioProcessor(audioContext);
+      activeProcessor = processor;
       source.connect(processor);
       processor.connect(audioContext.destination);
-
-      processor.onaudioprocess = function (audioProcessingEvent) {
-        const inputBuffer = audioProcessingEvent.inputBuffer;
-        const inputData = inputBuffer.getChannelData(0);
-
-        const rms = Math.sqrt(inputData.reduce((sum, val) => sum + val * val, 0) / inputData.length);
-        const scaledVolume = Math.min(rms * 10, 1);
-        halo.style.width = `${100 + scaledVolume * 100}px`;
-        halo.style.height = `${100 + scaledVolume * 100}px`;
-        halo.style.opacity = scaledVolume;
-
-        const pcmSamples = new Int16Array(inputData.map(sample => Math.max(-1, Math.min(1, sample)) * 32767));
-        const byteArray = new Uint8Array(pcmSamples.buffer);
-        const base64Data = btoa(String.fromCharCode(...byteArray));
-
-        audioQueue.push(base64Data);
-        logDebug(`Audio package queued: ${base64Data.substring(0, 30)}...`);
-        processQueue();
-      };
+      
+      isRecording = true;
+      toggleButton.disabled = false;
+      toggleButton.textContent = 'Stop Recording';
       logDebug('Recording started. Speak into your microphone.');
-    })
-    .catch((error) => {
-      logDebug(`Error: Could not access the microphone. Details: ${error.message}`);
-      alert('Could not access your microphone. Please check your permissions.');
-    });
+
+    } catch (error) {
+      let errorMessage = 'Could not access your microphone. ';
+      
+      if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+        errorMessage += 'The microphone permission was denied. Please allow microphone access in your browser settings.';
+      } else if (error.name === 'NotFoundError') {
+        errorMessage += 'No microphone was found on your device.';
+      } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
+        errorMessage += 'Your microphone is busy or not readable. Please make sure no other application is using it.';
+      } else if (error.name === 'OverconstrainedError') {
+        errorMessage += 'Could not satisfy the requested audio constraints. Please try with different audio settings.';
+      } else if (error.name === 'TypeError') {
+        errorMessage += 'No permission to use MediaDevices API. Please make sure you\'re using HTTPS or localhost.';
+      } else {
+        errorMessage += `An unexpected error occurred: ${error.message}`;
+      }
+      
+      logDebug(`Error: ${errorMessage}\nError name: ${error.name}`);
+      alert(errorMessage);
+
+      // Clean up on error
+      stopRecording();
+    }
+  };
 
   async function processQueue() {
     if (audioQueue.length === 0) return;
 
     const payload = { audioPackages: [...audioQueue] };
     try {
-      const response = await fetch('http://localhost/audio.php', {
+      //const response = await fetch('http://localhost/audio2.php', {
+      const response = await fetch('http://127.0.0.1:8000/process-audio', { 
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json' }, 
         body: JSON.stringify(payload),
       });
+
 
       if (response.status === 200) {
         logDebug('Audio packages sent successfully.');
         audioQueue.length = 0; // Clear queue on success
         const result = await response.json();
-        if (result.audioPackages) {
-          playAudio(result.audioPackages);
+        if (result.audioPackages) {     
+  
+          result.audioPackages.forEach(package => {
+                // Base64 validation pattern  
+                const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
+                
+                // Only add if the position is empty and the chunk is valid
+                if (audiobuffer[package.idx] === undefined) 
+                  if (base64Regex.test(package.audio)) {
+                    // Place each chunk at its correct index position
+                    audiobuffer[package.idx] = package.audio;
+                  } else {
+                    console.warn(`Invalid base64 data received at index ${package.idx}`);
+                  }                
+                  
+
+            });
+          if (result.audioFrame === 'done' && !played) {
+            played = true;
+            playAudio(audiobuffer);
+            audiobuffer = [];
+          }
         }
       } else if (response.status === 429) {
         logDebug('Backend returned 429. Retrying in 300ms...');
@@ -198,21 +396,30 @@ window.onload = async function () {
   }
 
   async function playAudio(audioPackages) {
-    for (const base64Audio of audioPackages) {
-      const audioBuffer = Uint8Array.from(atob(base64Audio), c => c.charCodeAt(0));
-      const pcmAudio = new Int16Array(audioBuffer.buffer);
-      const audioData = audioContext.createBuffer(1, pcmAudio.length, 24000);
-      const audioChannel = audioData.getChannelData(0);
+    if (!audioContext || audioContext.state === 'closed') {
+      audioContext = new AudioContext({ sampleRate: 24000 });
+    }
+    
+    for (let i = 0; i < audioPackages.length; i++) {
+      try {
+        const audioBuffer = Uint8Array.from(atob(audioPackages[i]), c => c.charCodeAt(0));
+        const pcmAudio = new Int16Array(audioBuffer.buffer);
+        const audioData = audioContext.createBuffer(1, pcmAudio.length, 24000);
+        const audioChannel = audioData.getChannelData(0);
 
-      for (let i = 0; i < pcmAudio.length; i++) {
-        audioChannel[i] = pcmAudio[i] / 32768;
+        for (let j = 0; j < pcmAudio.length; j++) {
+          audioChannel[j] = pcmAudio[j] / 32768;
+        }
+
+        const source = audioContext.createBufferSource();
+        source.buffer = audioData;
+        source.connect(audioContext.destination);
+        source.start();
+        logDebug('Audio package played back successfully.');
+      } catch (error) {
+        console.warn(`Error decoding audio chunk at index ${i}: ${error.message}`);
+        // Continue with next chunk
       }
-
-      const source = audioContext.createBufferSource();
-      source.buffer = audioData;
-      source.connect(audioContext.destination);
-      source.start();
-      logDebug('Audio played back successfully.');
     }
   }
 };
